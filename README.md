@@ -1,34 +1,195 @@
+<p align="center">
+  <img src="https://img.shields.io/badge/Swift-6.0+-F05138?style=flat&logo=swift&logoColor=white" alt="Swift 6.0+" />
+  <img src="https://img.shields.io/badge/Platforms-iOS_15+_|_macOS_12+_|_tvOS_15+_|_watchOS_8+-blue?style=flat" alt="Platforms" />
+  <img src="https://img.shields.io/badge/SPM-Compatible-brightgreen?style=flat&logo=swift" alt="SPM Compatible" />
+  <img src="https://img.shields.io/badge/Dependencies-Zero_(Core)-orange?style=flat" alt="Zero Dependencies" />
+  <img src="https://img.shields.io/badge/Concurrency-Sendable_✓-purple?style=flat" alt="Sendable" />
+  <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=flat" alt="MIT License" />
+</p>
+
 # Fiber
 
-A functional, Axios-style HTTP networking library for Swift. Chainable requests, composable interceptors, distributed tracing, WebSocket support, and first-class testability. Zero third-party dependencies.
+A **functional**, Axios-style HTTP networking library for Swift. Immutable value types, composable interceptors, distributed tracing, WebSocket support, and first-class testability. Zero third-party dependencies in core.
 
 ```swift
 let fiber = Fiber("https://api.example.com") {
-    $0.interceptors = [auth, retry, logging, cache]
+    $0.interceptors = [auth, retry, cache, logging]
 }
 
 let users: [User] = try await fiber.get("/users", query: ["page": "1"]).decode()
 ```
 
+---
+
+<p align="center">
+  <a href="#why-fiber">Why Fiber</a> &nbsp;&bull;&nbsp;
+  <a href="#quick-start">Quick Start</a> &nbsp;&bull;&nbsp;
+  <a href="#features">Features</a> &nbsp;&bull;&nbsp;
+  <a href="#installation">Installation</a> &nbsp;&bull;&nbsp;
+  <a href="#documentation">Documentation</a> &nbsp;&bull;&nbsp;
+  <a href="#comparison">Comparison</a> &nbsp;&bull;&nbsp;
+  <a href="#architecture">Architecture</a>
+</p>
+
+---
+
+## Why Fiber
+
+Most Swift HTTP libraries are built around mutable objects — session managers, request adapters, response serializers. Fiber takes a different approach: **everything is a value**.
+
+Requests are immutable structs. Interceptors are pure functions. Responses are value types with chainable transforms. No reference semantics, no shared mutable state, no data races.
+
+```swift
+// Requests are values — every method returns a new copy
+let base = FiberRequest(url: "https://api.example.com/users")
+let withAuth = base.header("Authorization", "Bearer tok")
+// base.headers is still empty — withAuth has the header
+
+// Interceptors are functions — compose them like middleware
+let pipeline = [auth, retry, cache, logging]
+
+// Responses are values — chain transforms without mutation
+let users: [User] = try response.validateStatus().decode()
+```
+
+### Pros
+
+- **Functional & Immutable** — Value types everywhere. No shared mutable state. No data races. Every combinator returns a new copy.
+- **Composable Middleware** — Interceptors compose like functions. Build complex pipelines from small, testable pieces. Auth, retry, cache, rate limit, encryption — all stackable.
+- **Zero Core Dependencies** — Core module uses only Foundation, OSLog, and CryptoKit. No dependency tree to manage.
+- **Swift 6 Strict Concurrency** — `Sendable` throughout. Actor-based caches and rate limiters. TaskLocal tracing. No `@unchecked` escape hatches in your code.
+- **First-Class Testability** — `MockTransport` records requests and returns stubs. `MockWebSocket.pair()` creates paired fakes. No protocol witnesses or heavyweight mocking frameworks needed.
+- **Modular** — Use only what you need. Core HTTP, WebSocket, validation, caching, and dependency injection are separate modules.
+- **Type-Safe Endpoints** — Define your API as value types. Get compile-time guarantees on response types.
+- **Production Interceptors** — 7 built-in interceptors cover auth, retry, cache, logging, metrics, encryption, and rate limiting — all battle-tested patterns.
+
+### Cons
+
+- **iOS 15+ / macOS 12+** — Requires Swift 6.0 and modern Apple platforms. No support for Linux or older OS versions.
+- **URLSession Only** — Built on URLSession. If you need custom transport layers (e.g., gRPC, QUIC), you must implement the `FiberTransport` protocol.
+- **No Upload/Download Progress** — Focused on JSON API communication. No built-in progress tracking for large file transfers.
+- **Young Library** — Newer than Alamofire or Moya. Smaller community and ecosystem.
+- **Functional Learning Curve** — If your team is used to OOP networking patterns, the immutable/compositional style may require adjustment.
+
+---
+
+## Quick Start
+
+### Basic Requests
+
+```swift
+import Fiber
+
+let api = Fiber("https://api.example.com")
+
+// GET with JSON decoding
+let users: [User] = try await api.get("/users").decode()
+
+// POST with Encodable body
+let created: User = try await api.post("/users", body: NewUser(name: "Alice")).decode()
+
+// All HTTP verbs
+try await api.put("/users/1", body: updated)
+try await api.patch("/users/1", body: PatchUser(name: "Bob"))
+try await api.delete("/users/1")
+```
+
+### Chainable Request Builder
+
+```swift
+let request = FiberRequest(url: "https://api.example.com/search")
+    .method(.post)
+    .header("Authorization", "Bearer tok")
+    .query("q", "swift")
+    .query("page", "1")
+    .jsonBody(SearchParams(filter: "active"))
+    .timeout(30)
+    .meta("cache", "skip")
+
+let response = try await api.send(request)
+```
+
+### Response Handling
+
+```swift
+let response = try await api.get("/users")
+
+response.statusCode              // 200
+response.isSuccess               // true (200-299)
+response.duration                // 0.142s
+response.traceID                 // "A1B2C3D4-..."
+response.header("Content-Type")  // "application/json"
+
+let validated = try response
+    .validateStatus()            // throws on non-2xx
+    .decode([User].self)         // decode JSON
+```
+
+### Type-Safe Endpoints
+
+```swift
+struct GetUser: Endpoint {
+    typealias Response = User
+    let id: String
+    var path: String { "/users/\(id)" }
+    var method: HTTPMethod { .get }
+}
+
+let user = try await api.request(GetUser(id: "123"))  // User, not FiberResponse
+```
+
+### Production Client
+
+```swift
+let api = Fiber("https://api.example.com") {
+    $0.interceptors = [
+        AuthInterceptor(
+            tokenProvider: { await tokenStore.accessToken },
+            tokenRefresher: { try await tokenStore.refresh() }
+        ),
+        RetryInterceptor(maxRetries: 3, baseDelay: 0.5),
+        RateLimitInterceptor(maxRequests: 60, perInterval: 60),
+        CacheInterceptor(ttl: 300, maxEntries: 100),
+        LoggingInterceptor(logger: OSLogFiberLogger(subsystem: "com.myapp")),
+        MetricsInterceptor(collector: InMemoryMetricsCollector()),
+    ]
+    $0.defaultHeaders = ["Accept": "application/json"]
+    $0.timeout = 30
+    $0.decoder = {
+        let d = JSONDecoder()
+        d.keyDecodingStrategy = .convertFromSnakeCase
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+}
+```
+
+---
+
 ## Features
 
-- **Functional & Chainable** -- Immutable value types with composable combinators
-- **Interceptor Pipeline** -- Axios-style request/response interceptors
-- **7 Built-in Interceptors** -- Auth, retry, cache, logging, metrics, encryption, rate limit
-- **Distributed Tracing** -- TaskLocal-based trace propagation with spans
-- **WebSocket** -- Protocol-based with auto-reconnection strategies
-- **100% Testable** -- MockTransport, StubResponse builders, MockWebSocket pairs
-- **Swift 6 Strict Concurrency** -- Sendable throughout, no data races
-- **Injectable Defaults** -- All constants centralized in FiberDefaults
-- **swift-dependencies** -- Optional Point-Free integration (FiberDependencies)
-- **swift-sharing** -- Optional reactive config + declarative API caching (FiberSharing)
-- **Domain Validation** -- Composable result-builder DSL for model validation (FiberValidation)
-- **Zero Core Dependencies** -- Core module uses only Foundation, OSLog, and CryptoKit
+| Feature | Description | Module |
+|---------|-------------|--------|
+| **Chainable Requests** | Immutable request builder with functional combinators | `Fiber` |
+| **Interceptor Pipeline** | Composable middleware — modify requests, responses, or short-circuit | `Fiber` |
+| **7 Built-in Interceptors** | Auth, retry, cache, logging, metrics, encryption, rate limit | `Fiber` |
+| **Type-Safe Endpoints** | Define API as value types with associated response types | `Fiber` |
+| **Distributed Tracing** | TaskLocal trace IDs, spans, and pluggable exporters | `Fiber` |
+| **Rich Error Types** | Typed errors with status codes, response data, and context | `Fiber` |
+| **WebSocket** | Protocol-based with typed messages and AsyncStream events | `FiberWebSocket` |
+| **Auto-Reconnection** | Exponential backoff, fixed delay, linear, or custom strategies | `FiberWebSocket` |
+| **Domain Validation** | Result-builder DSL for composable model validation | `FiberValidation` |
+| **Validation Interceptor** | Validate request bodies before they hit the network | `FiberValidation` |
+| **Mock Transport** | Record requests, return stubs, assert on request contents | `FiberTesting` |
+| **Mock WebSocket** | Paired fakes for bidirectional WebSocket testing | `FiberTesting` |
+| **Declarative Caching** | `@SharedReader`-based cache-first data fetching | `FiberSharing` |
+| **Stale-While-Revalidate** | Serve stale data instantly while refreshing in background | `FiberSharing` |
+| **ETag / Conditional Requests** | Automatic `If-None-Match` / `304 Not Modified` handling | `FiberSharing` |
+| **Shared Configuration** | Reactive config that rebuilds the client on change | `FiberSharing` |
+| **Dependency Injection** | Struct-of-closures client for swift-dependencies | `FiberDependencies` |
+| **Injectable Defaults** | Every constant centralized and overridable | `Fiber` |
 
-## Requirements
-
-- Swift 6.0+
-- iOS 15+ / macOS 12+ / tvOS 15+ / watchOS 8+
+---
 
 ## Installation
 
@@ -40,126 +201,75 @@ dependencies: [
 ]
 ```
 
-Add the targets you need:
+Add only the modules you need:
 
 ```swift
 .target(name: "MyApp", dependencies: [
-    "Fiber",                    // Core HTTP client
+    "Fiber",                    // Core HTTP client (zero third-party deps)
     "FiberWebSocket",           // WebSocket support
-    "FiberDependencies",        // swift-dependencies integration (optional)
-    "FiberSharing",             // swift-sharing integration (optional)
-    "FiberValidation",          // Domain model validation DSL (optional)
-    "FiberTesting",             // Mock infrastructure (test target only)
-    "FiberDependenciesTesting", // Test helpers for FiberDependencies (test only)
-])
+    "FiberValidation",          // Domain validation DSL
+    "FiberDependencies",        // swift-dependencies integration
+    "FiberSharing",             // swift-sharing + declarative caching
+]),
+.testTarget(name: "MyAppTests", dependencies: [
+    "FiberTesting",             // MockTransport, StubResponse, MockWebSocket
+    "FiberDependenciesTesting", // Test helpers for dependency injection
+]),
 ```
 
-## Quick Start
+### Module Dependency Graph
 
-### Basic Requests
-
-```swift
-import Fiber
-
-let fiber = Fiber("https://api.example.com")
-
-// GET
-let response = try await fiber.get("/users")
-let users: [User] = try response.decode()
-
-// POST with Encodable body
-let newUser = CreateUser(name: "Alice", email: "alice@example.com")
-let created: User = try await fiber.post("/users", body: newUser).decode()
-
-// PUT, PATCH, DELETE
-try await fiber.put("/users/1", body: updatedUser)
-try await fiber.patch("/users/1", body: PatchUser(name: "Bob"))
-try await fiber.delete("/users/1")
 ```
-
-### Chainable Request Builder
-
-Requests are immutable value types. Every combinator returns a new copy:
-
-```swift
-let request = FiberRequest(url: "https://api.example.com/search")
-    .method(.post)
-    .header("Authorization", "Bearer tok")
-    .header("Accept-Language", "en")
-    .query("q", "swift")
-    .query("page", "1")
-    .jsonBody(SearchParams(filter: "active"))
-    .timeout(30)
-    .meta("cache", "skip")  // arbitrary metadata for interceptors
-
-let response = try await fiber.send(request)
-```
-
-The original request is never mutated:
-
-```swift
-let base = FiberRequest(url: "https://api.example.com/users")
-let withAuth = base.header("Authorization", "Bearer tok")
-// base.headers is still empty
-```
-
-### Response Handling
-
-```swift
-let response = try await fiber.get("/users")
-
-// Decode JSON
-let users: [User] = try response.decode()
-
-// Status checks
-response.isSuccess      // 200-299
-response.isClientError  // 400-499
-response.isServerError  // 500-599
-
-// Raw access
-response.text           // UTF-8 string
-response.data           // Raw Data
-response.statusCode     // Int
-response.duration       // TimeInterval
-response.traceID        // Auto-generated trace ID
-response.header("Content-Type")  // Case-insensitive lookup
-
-// Validation chain
-let validated = try response
-    .validateStatus()  // throws on non-2xx
-    .validate { r in   // custom validation
-        guard r.header("X-Version") != nil else {
-            throw MyError.missingVersion
-        }
-    }
+Fiber (zero deps)
+├── FiberWebSocket
+├── FiberValidation (zero deps)
+├── FiberTesting
+├── FiberDependencies ── swift-dependencies
+│   └── FiberDependenciesTesting
+└── FiberSharing ── swift-sharing
 ```
 
 ---
 
-## Interceptors
+## Documentation
 
-Interceptors are the core extensibility mechanism. They form a pipeline around every request, like Axios interceptors or Express middleware.
+Detailed guides for every feature area:
+
+| Guide | Description |
+|-------|-------------|
+| **[Getting Started](docs/GettingStarted.md)** | Installation, first request, core concepts, configuration reference |
+| **[Interceptors](docs/Interceptors.md)** | Writing custom interceptors, all 7 built-ins, composition patterns, recommended pipeline order |
+| **[WebSocket](docs/WebSocket.md)** | Connecting, typed messages, AsyncStream events, auto-reconnection strategies |
+| **[Validation](docs/Validation.md)** | Result-builder DSL, 12 built-in rules, nested/collection/conditional validation, async rules |
+| **[Caching](docs/Caching.md)** | Cache policies, imperative & declarative caching, SWR, ETag, invalidation |
+| **[Testing](docs/Testing.md)** | MockTransport, StubResponse, MockWebSocket, testing interceptors, dependency testing |
+| **[Advanced](docs/Advanced.md)** | Distributed tracing, encryption, custom transports, metrics, injectable defaults, integrations |
+| **[Real-World Examples](docs/Examples.md)** | E-commerce, social feed, multi-tenant SaaS, offline-first, analytics pipeline |
+
+---
+
+## Interceptors at a Glance
+
+Interceptors form a bidirectional pipeline around every request:
 
 ```
-Request --> [Auth] --> [Retry] --> [Cache] --> [Logging] --> Transport --> Response
-                                                               |
-Response <-- [Auth] <-- [Retry] <-- [Cache] <-- [Logging] <---+
+Request ──► [Auth] ──► [Retry] ──► [Cache] ──► [Logging] ──► Transport
+                                                                 │
+Response ◄── [Auth] ◄── [Retry] ◄── [Cache] ◄── [Logging] ◄────┘
 ```
 
-### Writing Interceptors
-
-**As a closure** (quickest):
+Write one as a closure:
 
 ```swift
 let timing = AnyInterceptor("timing") { request, next in
     let start = Date()
     let response = try await next(request)
-    print("Request took \(Date().timeIntervalSince(start))s")
+    print("\(request.httpMethod) \(request.url.path) took \(Date().timeIntervalSince(start))s")
     return response
 }
 ```
 
-**As a struct** (reusable):
+Or as a reusable struct:
 
 ```swift
 struct APIKeyInterceptor: Interceptor {
@@ -175,255 +285,23 @@ struct APIKeyInterceptor: Interceptor {
 }
 ```
 
-**Short-circuit** (return without calling `next`):
-
-```swift
-let cached = AnyInterceptor("offlineCache") { request, next in
-    if let cached = OfflineStore.get(request.url) {
-        return FiberResponse(data: cached, statusCode: 200, request: request)
-    }
-    return try await next(request)
-}
-```
-
 ### Built-in Interceptors
 
-#### AuthInterceptor
+| Interceptor | What It Does |
+|-------------|-------------|
+| [`AuthInterceptor`](docs/Interceptors.md#authinterceptor) | Injects Bearer tokens, handles 401 refresh with automatic retry |
+| [`RetryInterceptor`](docs/Interceptors.md#retryinterceptor) | Exponential backoff with jitter for transient failures |
+| [`CacheInterceptor`](docs/Interceptors.md#cacheinterceptor) | In-memory TTL cache with LRU eviction |
+| [`LoggingInterceptor`](docs/Interceptors.md#logginginterceptor) | Structured request/response logging with trace IDs |
+| [`MetricsInterceptor`](docs/Interceptors.md#metricsinterceptor) | Collects duration, size, and success rate per request |
+| [`EncryptionInterceptor`](docs/Interceptors.md#encryptioninterceptor) | AES-GCM or custom encryption for request/response bodies |
+| [`RateLimitInterceptor`](docs/Interceptors.md#ratelimitinterceptor) | Token bucket rate limiter with configurable wait |
 
-Injects Bearer tokens and handles automatic 401 refresh:
-
-```swift
-let auth = AuthInterceptor(
-    tokenProvider: { await tokenStore.accessToken },
-    tokenRefresher: { try await tokenStore.refresh() },  // optional
-    headerName: "Authorization",     // default
-    headerPrefix: "Bearer ",         // default
-    isUnauthorized: { $0.statusCode == 401 }  // default
-)
-```
-
-#### RetryInterceptor
-
-Exponential backoff with jitter for transient failures:
-
-```swift
-let retry = RetryInterceptor(
-    maxRetries: 3,
-    baseDelay: 0.5,        // seconds
-    maxDelay: 30,
-    retryableStatusCodes: [408, 429, 500, 502, 503, 504],
-    retryableMethods: [.get, .head, .options, .put, .delete],
-    shouldRetry: { error in
-        (error as? URLError)?.code == .timedOut
-    }
-)
-```
-
-#### CacheInterceptor
-
-In-memory TTL cache for GET/HEAD requests:
-
-```swift
-let cache = CacheInterceptor(
-    ttl: 300,           // 5 minutes
-    maxEntries: 100,
-    cacheableMethods: [.get, .head]
-)
-
-// Programmatic eviction
-await cache.clear()
-await cache.evict(url: "/config")
-```
-
-#### LoggingInterceptor
-
-Structured request/response logging:
-
-```swift
-let logging = LoggingInterceptor(logger: OSLogFiberLogger(subsystem: "com.myapp"))
-```
-
-Output:
-```
-[→ GET /users] trace=A1B2C3
-[← 200 OK] 42ms trace=A1B2C3
-```
-
-#### MetricsInterceptor
-
-Performance metrics collection:
-
-```swift
-let collector = InMemoryMetricsCollector()
-let metrics = MetricsInterceptor(collector: collector)
-
-// After requests...
-let avg = await collector.averageDurationMs
-let rate = await collector.successRate
-let all = await collector.metrics  // [RequestMetrics]
-```
-
-Implement `MetricsCollector` for custom backends:
-
-```swift
-struct DataDogCollector: MetricsCollector {
-    func collect(_ metrics: RequestMetrics) async {
-        // Send to DataDog, Prometheus, etc.
-    }
-}
-```
-
-#### EncryptionInterceptor
-
-Encrypts request bodies, decrypts response bodies:
-
-```swift
-import CryptoKit
-
-// Built-in AES-GCM
-let key = SymmetricKey(size: .bits256)
-let encryption = EncryptionInterceptor(
-    provider: AESGCMEncryptionProvider(key: key),
-    encryptRequest: true,
-    decryptResponse: true
-)
-
-// Or plug in your own
-struct ChaChaEncryption: EncryptionProvider {
-    func encrypt(_ data: Data) throws -> Data { /* ... */ }
-    func decrypt(_ data: Data) throws -> Data { /* ... */ }
-}
-```
-
-#### RateLimitInterceptor
-
-Client-side token bucket rate limiting:
-
-```swift
-let rateLimit = RateLimitInterceptor(
-    maxRequests: 60,
-    perInterval: 60.0,   // 60 requests per minute
-    maxWait: 30.0        // wait up to 30s for a slot, then throw
-)
-```
-
-### Composing Interceptors
-
-Pass interceptors in the order you want them to execute. The first interceptor is outermost (processes the request first, the response last):
-
-```swift
-let fiber = Fiber("https://api.example.com") {
-    $0.interceptors = [
-        auth,         // 1st: inject token
-        retry,        // 2nd: retry on failure
-        rateLimit,    // 3rd: throttle
-        cache,        // 4th: return cached if available
-        logging,      // 5th: log the final request/response
-        metrics,      // 6th: collect timing
-    ]
-}
-```
-
----
-
-## Type-Safe Endpoints
-
-Define your API surface as value types:
-
-```swift
-struct GetUser: Endpoint {
-    typealias Response = User
-    let id: String
-    var path: String { "/users/\(id)" }
-    var method: HTTPMethod { .get }
-}
-
-struct CreateUser: Endpoint {
-    typealias Response = User
-    let body: Data?
-
-    var path: String { "/users" }
-    var method: HTTPMethod { .post }
-
-    init(name: String, email: String) {
-        self.body = try? JSONEncoder().encode(["name": name, "email": email])
-    }
-}
-
-struct SearchUsers: Endpoint {
-    typealias Response = [User]
-    let query: String
-    var path: String { "/users" }
-    var method: HTTPMethod { .get }
-    var queryItems: [URLQueryItem] { [URLQueryItem(name: "q", value: query)] }
-}
-
-// Usage
-let user = try await fiber.request(GetUser(id: "123"))
-let results = try await fiber.request(SearchUsers(query: "alice"))
-```
-
----
-
-## Distributed Tracing
-
-Every request gets an auto-generated trace ID, propagated through Swift's `TaskLocal` system:
-
-```swift
-let response = try await fiber.get("/users")
-print(response.traceID)  // "A1B2C3D4-..."
-```
-
-Access the current trace ID inside interceptors:
-
-```swift
-let logger = AnyInterceptor("logger") { request, next in
-    let traceID = TraceContext.traceID
-    print("[\(traceID)] \(request.httpMethod) \(request.url)")
-    return try await next(request)
-}
-```
-
-### Spans
-
-Measure sub-operations within a trace:
-
-```swift
-var span = Span(name: "parseResponse")
-// ... do work ...
-let finished = span.finish()
-print("Took \(finished.durationMs ?? 0)ms")
-```
-
-### Custom Metadata
-
-Attach arbitrary context to the trace:
-
-```swift
-try await TraceContext.$metadata.withValue(["userId": "123", "feature": "search"]) {
-    let response = try await fiber.get("/search")
-}
-```
-
-### Trace Export
-
-Implement `TraceExporter` to ship spans to your observability backend:
-
-```swift
-struct JaegerExporter: TraceExporter {
-    func export(_ spans: [Span]) async {
-        for span in spans {
-            // Send to Jaeger, Zipkin, OTLP, etc.
-        }
-    }
-}
-```
+[Full Interceptors Guide →](docs/Interceptors.md)
 
 ---
 
 ## WebSocket
-
-### Protocol
 
 ```swift
 import FiberWebSocket
@@ -433,383 +311,52 @@ let ws = URLSessionWebSocketTransport.connect(to: URL(string: "wss://ws.example.
 for await event in ws.events {
     switch event {
     case .connected:
-        try await ws.send(.text("hello"))
-    case .message(.text(let text)):
-        print("Received: \(text)")
-    case .message(.binary(let data)):
-        print("Binary: \(data.count) bytes")
-    case .disconnected(let code, let reason):
-        print("Disconnected: \(code ?? 0) \(reason ?? "")")
+        try await ws.sendJSON(ChatMessage(user: "alice", text: "hello"))
+    case .message(let msg):
+        if let chat: ChatMessage = try? msg.decode() { print(chat) }
+    case .disconnected(let code, _):
+        print("Disconnected: \(code ?? 0)")
     case .error(let error):
         print("Error: \(error)")
     }
 }
 ```
 
-### Typed Messages
-
-```swift
-struct ChatMessage: Codable {
-    let user: String
-    let text: String
-}
-
-// Send as JSON
-try await ws.send(.json(ChatMessage(user: "alice", text: "hello")))
-
-// Decode received
-if case .message(let msg) = event {
-    let chat: ChatMessage = try msg.decode()
-}
-```
-
-### Auto-Reconnection
+Auto-reconnection with configurable strategies:
 
 ```swift
 let ws = ReconnectingWebSocket(
     connect: { URLSessionWebSocketTransport.connect(to: myURL) },
     strategy: .exponentialBackoff(baseDelay: 1, maxDelay: 30, maxAttempts: 10)
 )
-
 Task { await ws.start() }
-
-for await event in ws.events {
-    // Automatically reconnects on disconnection
-}
-
-// Built-in strategies:
-ReconnectionStrategy.exponentialBackoff()     // 1s, 2s, 4s, 8s... + jitter
-ReconnectionStrategy.fixedDelay(5.0)          // 5s, 5s, 5s...
-ReconnectionStrategy.linearBackoff()          // 1s, 2s, 3s, 4s...
-ReconnectionStrategy.none                     // no reconnection
 ```
+
+| Strategy | Delays |
+|----------|--------|
+| `.exponentialBackoff()` | 1s, 2s, 4s, 8s... + jitter |
+| `.fixedDelay(5.0)` | 5s, 5s, 5s... |
+| `.linearBackoff()` | 1s, 2s, 3s, 4s... |
+| `.none` | No reconnection |
+
+[Full WebSocket Guide →](docs/WebSocket.md)
 
 ---
 
-## Injectable Defaults (FiberDefaults)
+## Validation
 
-All hardcoded constants are centralized in `FiberDefaults`. Override them globally or per-component:
-
-```swift
-// Override globally at app startup
-FiberDefaults.shared = FiberDefaults(
-    jitterFraction: 0.5,
-    exponentialBackoffBase: 3.0,
-    loggingSystemName: "NET",
-    logBodyTruncationLimit: 2000,
-    rateLimitSleepIncrement: 0.2,
-    jsonContentType: "application/vnd.api+json",
-    traceIDGenerator: { UUID().uuidString.lowercased() },
-    webSocketDefaultCloseCode: 1001
-)
-
-// Or per-component
-let retry = RetryInterceptor(
-    maxRetries: 3,
-    defaults: FiberDefaults(exponentialBackoffBase: 3.0)
-)
-
-// Or via the builder
-let fiber = Fiber("https://api.example.com") {
-    $0.defaults = FiberDefaults(traceIDGenerator: { "custom-\(Date())" })
-}
-```
-
-| Constant | Default | Used In |
-|----------|---------|---------|
-| `jitterFraction` | 0.25 | RetryInterceptor, ReconnectionStrategy |
-| `exponentialBackoffBase` | 2.0 | RetryInterceptor, ReconnectionStrategy |
-| `loggingSystemName` | "HTTP" | LoggingInterceptor |
-| `logBodyTruncationLimit` | 1000 | LoggingInterceptor |
-| `rateLimitSleepIncrement` | 0.1 | RateLimitInterceptor |
-| `jsonContentType` | "application/json" | FiberRequest.jsonBody() |
-| `traceIDGenerator` | UUID().uuidString | Fiber.send() |
-| `webSocketDefaultCloseCode` | 1000 | WebSocket close methods |
-
----
-
-## swift-dependencies Integration (FiberDependencies)
-
-Optional integration with [Point-Free's swift-dependencies](https://github.com/pointfreeco/swift-dependencies).
-
-### Struct-of-Closures Client
-
-```swift
-import FiberDependencies
-
-// In your feature:
-@Dependency(\.fiberHTTPClient) var httpClient
-
-let response = try await httpClient.get("/users", [:], [:])
-let users: [User] = try response.decode()
-```
-
-### Overriding in Tests
-
-```swift
-withDependencies {
-    $0.fiberHTTPClient.get = { path, query, headers in
-        FiberResponse.empty  // or build a custom response
-    }
-} operation: {
-    // your code under test
-}
-```
-
-### Live Client Setup
-
-```swift
-// From an existing Fiber instance
-let client = FiberHTTPClient.live(myFiber)
-
-// Or directly from a base URL
-let client = FiberHTTPClient.live("https://api.example.com") {
-    $0.interceptors = [authInterceptor, retryInterceptor]
-}
-```
-
-### Full Fiber as Dependency
-
-```swift
-@Dependency(\.fiber) var fiber
-
-// Configure at app startup:
-withDependencies {
-    $0.fiber = Fiber("https://api.example.com") {
-        $0.interceptors = [auth, retry, logging]
-    }
-} operation: {
-    // app code
-}
-```
-
-### FiberDefaults as Dependency
-
-```swift
-@Dependency(\.fiberDefaults) var defaults
-
-// Override in tests:
-withDependencies {
-    $0.fiberDefaults = FiberDefaults(traceIDGenerator: { "fixed-trace-id" })
-} operation: { ... }
-```
-
-### Test Helpers (FiberDependenciesTesting)
-
-```swift
-import FiberDependenciesTesting
-
-// Client backed by MockTransport
-let (client, mock) = FiberHTTPClient.test()
-mock.stubAll(StubResponse.ok(body: "{\"ok\": true}"))
-let response = try await client.get("/health", [:], [:])
-
-// Simple stub client
-let client = FiberHTTPClient.stub(.ok(body: "stubbed"))
-```
-
----
-
-## swift-sharing Integration (FiberSharing)
-
-Optional integration with [Point-Free's swift-sharing](https://github.com/pointfreeco/swift-sharing) for reactive configuration and declarative API caching.
-
-### Shared Configuration
-
-```swift
-import FiberSharing
-import Sharing
-
-@Shared(.fiberConfiguration) var config
-
-// Update config from anywhere:
-$config.withLock { $0.baseURL = "https://staging.api.com" }
-$config.withLock { $0.authToken = "new-token" }
-```
-
-### SharedFiber — Reactive Client
-
-```swift
-let shared = SharedFiber()
-
-// Reads current @Shared(.fiberConfiguration) and builds a Fiber client.
-// Automatically rebuilds when config changes.
-let response = try await shared.get("/users")
-```
-
-### Custom Configuration Hook
-
-```swift
-let shared = SharedFiber { config, fiberConfig in
-    fiberConfig.interceptors = [
-        AuthInterceptor(tokenProvider: { config.authToken })
-    ]
-    fiberConfig.timeout = config.defaultTimeout
-}
-```
-
-### Declarative API Caching
-
-Bridge Fiber HTTP into swift-sharing's `@SharedReader` for reactive, cache-first data fetching:
-
-```swift
-import FiberSharing
-import Sharing
-
-// Declarative — data is fetched and cached automatically.
-// Memory -> disk -> network fallback with TTL expiration.
-@SharedReader(.api("/users", as: [User].self))
-var users: CachedResponse<[User]>
-
-// With custom cache policy
-@SharedReader(.api("/users", as: [User].self, policy: .aggressive))
-var aggressiveUsers: CachedResponse<[User]>
-
-// Shorthand with custom TTL and storage
-@SharedReader(.cachedAPI("/config", as: AppConfig.self, ttl: 3600, storage: .disk))
-var config: CachedResponse<AppConfig>
-```
-
-Access cache metadata on responses:
-
-```swift
-if let users = users {
-    print(users.value)       // [User] — the decoded data
-    print(users.isFresh)     // true if within TTL
-    print(users.isExpired)   // true if past TTL
-    print(users.age)         // seconds since cached
-    print(users.etag)        // ETag header, if server sent one
-}
-```
-
-### Imperative Cached Fetching
-
-For view models and one-off requests:
-
-```swift
-let fiber = SharedFiber()
-
-// Cache-first fetch: memory -> disk -> network
-let result = try await fiber.getCached("/users", as: [User].self)
-print(result.value)   // [User]
-print(result.isFresh) // true
-
-// With custom policy
-let config = try await fiber.getCached(
-    "/config", as: AppConfig.self,
-    policy: .persistent  // 1hr TTL, disk-backed
-)
-
-// With query parameters
-let page = try await fiber.getCached(
-    "/users", as: [User].self,
-    query: ["page": "2", "limit": "20"],
-    policy: .aggressive
-)
-```
-
-### Cache Policies
-
-Built-in presets for common scenarios:
-
-| Preset | TTL | Stale-While-Revalidate | Storage | Max Entries |
-|--------|-----|----------------------|---------|-------------|
-| `.default` | 5 min | 0 | Memory | 100 |
-| `.aggressive` | 30 min | 60s | Memory + Disk | 200 |
-| `.noCache` | 0 | 0 | -- | 0 |
-| `.persistent` | 1 hr | 5 min | Disk | 500 |
-
-Create custom policies:
-
-```swift
-let custom = CachePolicy(
-    ttl: 600,                           // 10 minutes
-    staleWhileRevalidate: 120,          // serve stale for 2 more min while refreshing
-    storageMode: .memoryAndDisk,
-    maxEntries: 50
-)
-```
-
-### Conditional Requests (ETag / Last-Modified)
-
-When a server returns `ETag` or `Last-Modified` headers, subsequent requests automatically include `If-None-Match` or `If-Modified-Since`. On `304 Not Modified`, the cache TTL is refreshed without re-downloading data:
-
-```swift
-// First request: server returns ETag: "v1"
-let users = try await fiber.getCached("/users", as: [User].self)
-// users.etag == "\"v1\""
-
-// Second request (after TTL expires): sends If-None-Match: "v1"
-// Server returns 304 -> cached data is refreshed, no bandwidth wasted
-let refreshed = try await fiber.getCached("/users", as: [User].self)
-```
-
-### Stale-While-Revalidate
-
-Serve expired data immediately while refreshing in the background:
-
-```swift
-let policy = CachePolicy(
-    ttl: 300,                    // Fresh for 5 minutes
-    staleWhileRevalidate: 60     // Serve stale for 1 more minute while refreshing
-)
-
-// If cache is 6 minutes old (expired but within stale window):
-// - Returns stale data immediately
-// - Kicks off background refresh
-// - Next access gets fresh data
-let result = try await fiber.getCached("/feed", as: [FeedItem].self, policy: policy)
-```
-
-### Cache Invalidation
-
-```swift
-let fiber = SharedFiber()
-
-// Invalidate a specific path
-await fiber.invalidateCache(for: "/users")
-
-// Invalidate with query params
-await fiber.invalidateCache(for: "/users", query: ["page": "1"])
-
-// Invalidate all paths matching a prefix
-await fiber.invalidateCacheMatching("GET:/users")  // /users, /users/1, /users?page=2
-
-// Clear everything (memory + disk)
-await fiber.clearCache()
-```
-
-### SharedCacheStore
-
-The centralized cache manager is an actor shared between declarative and imperative APIs:
-
-```swift
-let store = SharedCacheStore.shared
-
-// Direct access (advanced usage)
-let cached: CachedResponse<[User]>? = await store.get("GET:/users", as: [User].self)
-await store.invalidateAll()
-await store.clearDisk()
-print(await store.memoryCount)
-```
-
----
-
-## Domain Validation (FiberValidation)
-
-A composable, type-safe validation system for any domain model. Uses Swift result builders for a declarative DSL, supports nested objects, collections, conditional rules, async validation, and integrates with Fiber's interceptor pipeline.
+Composable, type-safe domain validation with a result-builder DSL:
 
 ```swift
 import FiberValidation
 
-let userValidator = Validator<User> {
+let validateUser = Validator<User> {
     Validate(\.name, label: "name") {
         ValidationRule.notEmpty(message: "Name is required")
         ValidationRule.minLength(2)
         ValidationRule.maxLength(100)
     }
     Validate(\.email, label: "email") {
-        ValidationRule.notEmpty()
         ValidationRule.email()
     }
     Validate(\.age, label: "age") {
@@ -817,367 +364,88 @@ let userValidator = Validator<User> {
     }
 }
 
-let result = userValidator.validate(user)
-if !result.isValid {
-    for error in result.errorItems {
-        print("\(error.path): \(error.message)")
-        // "name: Name is required"
-        // "email: Invalid email format"
-    }
-}
+let result = validateUser.validate(user)
+// result.isValid, result.errorItems, result.warningItems
 ```
 
-### Built-in Rules
+Supports nested objects, collections, conditional rules, async validation, and severity levels. Integrates with Fiber's interceptor pipeline via `ValidationInterceptor`.
 
-| Rule | Constraint | Description |
-|------|-----------|-------------|
-| `.notNil()` | `Optional` | Must not be nil |
-| `.notEmpty()` | `Collection` | Must not be empty |
-| `.minLength(_:)` | `Collection` | Count >= minimum |
-| `.maxLength(_:)` | `Collection` | Count <= maximum |
-| `.lengthRange(_:)` | `Collection` | Count within range |
-| `.pattern(_:)` | `String` | Matches regex pattern |
-| `.email()` | `String` | Valid email format |
-| `.url()` | `String` | Valid URL format |
-| `.range(_:)` | `Comparable` | Within closed range |
-| `.equals(_:)` | `Equatable` | Must equal expected value |
-| `.custom(_:)` | any | Custom sync predicate |
-| `.asyncCustom(_:)` | any | Custom async predicate |
+[Full Validation Guide →](docs/Validation.md)
 
-Every rule accepts optional `message`, `code`, and `severity` parameters:
+---
+
+## Caching
+
+Advanced caching via `FiberSharing` with disk persistence, stale-while-revalidate, and ETag support:
 
 ```swift
-ValidationRule.minLength(8, message: "Password too short", code: "passwordLength", severity: .error)
+import FiberSharing
+
+let fiber = SharedFiber()
+
+// Cache-first: memory → disk → network
+let result = try await fiber.getCached("/users", as: [User].self, policy: .aggressive)
+result.value      // [User]
+result.isFresh    // true if within TTL
+result.age        // seconds since cached
+
+// Declarative with @SharedReader
+@SharedReader(.api("/users", as: [User].self))
+var users: CachedResponse<[User]>
 ```
 
-### Nested Validation
+| Preset | TTL | SWR | Storage |
+|--------|-----|-----|---------|
+| `.default` | 5 min | 0 | Memory |
+| `.aggressive` | 30 min | 60s | Memory + Disk |
+| `.persistent` | 1 hr | 5 min | Disk |
+| `.noCache` | 0 | 0 | — |
 
-Compose validators for nested objects. Paths are automatically prefixed:
-
-```swift
-let addressValidator = Validator<Address> {
-    Validate(\.street, label: "street") { ValidationRule.notEmpty() }
-    Validate(\.city, label: "city") { ValidationRule.notEmpty() }
-    Validate(\.zipCode, label: "zipCode") { ValidationRule.pattern(#"^\d{5}$"#) }
-}
-
-let userValidator = Validator<User> {
-    Validate(\.address, label: "address", validator: addressValidator)
-}
-
-// Errors have prefixed paths: "address.street", "address.zipCode"
-```
-
-### Collection Validation
-
-Validate each element with indexed error paths:
-
-```swift
-let validator = Validator<User> {
-    ValidateEach(\.tags, label: "tags") {
-        ValidationRule.notEmpty()
-        ValidationRule.maxLength(50)
-    }
-}
-
-// Errors: "tags[0]: Must not be empty", "tags[2]: ..."
-```
-
-### Conditional Validation
-
-Apply rules only when a condition is met:
-
-```swift
-let validator = Validator<User> {
-    ValidateIf({ $0.isAdmin }) {
-        Validate(\.adminCode, label: "adminCode") {
-            ValidationRule.notNil(message: "Admin code required")
-        }
-    }
-}
-```
-
-### Async Validation
-
-For rules that require network calls (e.g., uniqueness checks):
-
-```swift
-let validator = Validator<User> {
-    Validate(\.email, label: "email") {
-        ValidationRule.email()
-        ValidationRule.asyncCustom(message: "Email already taken") { email in
-            await checkEmailAvailability(email)
-        }
-    }
-}
-
-let result = await validator.validateAsync(user)
-```
-
-### Severity Levels
-
-Rules default to `.error` severity. Use `.warning` for non-blocking issues:
-
-```swift
-Validate(\.name, label: "name") {
-    ValidationRule.notEmpty()                                   // .error (default)
-    ValidationRule.minLength(10, severity: .warning)            // .warning
-}
-
-let result = validator.validate(user)
-result.isValid                    // true (no errors, just warnings)
-result.hasWarnings                // true
-result.isValid(failOnWarnings: true)  // false (treats warnings as errors)
-```
-
-### ValidationResult
-
-```swift
-let result = validator.validate(user)
-
-result.isValid            // true if no .error severity items
-result.isClean            // true if no items at all (no errors or warnings)
-result.hasWarnings        // true if any .warning severity items
-result.errorItems         // [ValidationError] with .error severity
-result.warningItems       // [ValidationError] with .warning severity
-result.errors             // all [ValidationError] regardless of severity
-
-// Merge results
-let combined = result1.merging(result2)
-```
-
-### Fiber Interceptor Integration
-
-Automatically validate request bodies before they hit the network:
-
-```swift
-import Fiber
-import FiberValidation
-
-let createUserValidator = Validator<CreateUser> {
-    Validate(\.name, label: "name") {
-        ValidationRule.notEmpty(message: "Name is required")
-        ValidationRule.minLength(2)
-    }
-    Validate(\.email, label: "email") {
-        ValidationRule.email()
-    }
-}
-
-let fiber = Fiber(baseURL: url, interceptors: [
-    ValidationInterceptor<CreateUser>(validator: createUserValidator)
-], transport: transport)
-
-// Valid body — request proceeds normally
-let response = try await fiber.post("/users", body: validUser)
-
-// Invalid body — throws FiberError.interceptor before sending
-do {
-    _ = try await fiber.post("/users", body: invalidUser)
-} catch let error as FiberError {
-    if case .interceptor(let name, let underlying) = error {
-        let failure = underlying as! ValidationFailure
-        print(failure.result.errorItems)  // [ValidationError]
-    }
-}
-```
-
-Configure which HTTP methods trigger validation and whether warnings fail:
-
-```swift
-ValidationInterceptor<CreateUser>(
-    validator: createUserValidator,
-    for: [.post, .put],       // default: [.post, .put, .patch]
-    failOnWarnings: true       // default: false
-)
-```
+[Full Caching Guide →](docs/Caching.md)
 
 ---
 
 ## Testing
 
-Fiber ships with `FiberTesting`, a dedicated module for writing tests against your networking code without hitting real servers.
-
-### MockTransport
-
-Drop-in replacement for URLSession:
-
 ```swift
 import FiberTesting
 
 let mock = MockTransport()
-mock.stubAll(.ok(body: #"{"id": 1, "name": "Alice"}"#))
+mock.stubAll(.ok(body: #"[{"id": 1, "name": "Alice"}]"#))
 
-let fiber = Fiber(baseURL: URL(string: "https://api.example.com")!, transport: mock)
-let response = try await fiber.get("/users/1")
+let api = Fiber(baseURL: URL(string: "https://api.example.com")!, transport: mock)
+let users: [User] = try await api.get("/users").decode()
 
-#expect(response.statusCode == 200)
+#expect(users.count == 1)
 #expect(mock.requests.count == 1)
-#expect(mock.lastRequest?.url?.path == "/users/1")
+#expect(mock.lastRequest?.url?.path == "/users")
 ```
 
-### Conditional Stubs
+Conditional stubs, chainable `StubResponse` builders, `MockWebSocket.pair()` for bidirectional testing, `TestTraceCollector` for log assertions.
 
-```swift
-mock.stub { req in
-    if req.url?.path == "/users" {
-        return .ok(body: #"[{"id": 1}]"#)
-    }
-    return nil  // fall through to next stub
-}
-
-mock.stub { req in
-    if req.httpMethod == "DELETE" {
-        return .noContent()
-    }
-    return nil
-}
-
-// Default fallback for unmatched requests
-mock.stubDefault { _ in .notFound() }
-```
-
-### StubResponse Builder
-
-Chainable, like everything else:
-
-```swift
-let stub = StubResponse.ok()
-    .header("X-Request-Id", "abc123")
-    .header("Content-Type", "application/json")
-    .body(#"{"users": []}"#)
-
-// From Encodable
-let stub = StubResponse.ok().jsonBody(User(id: 1, name: "Alice"))
-
-// Factory methods
-StubResponse.ok()           // 200
-StubResponse.created()      // 201
-StubResponse.noContent()    // 204
-StubResponse.badRequest()   // 400
-StubResponse.unauthorized() // 401
-StubResponse.notFound()     // 404
-StubResponse.serverError()  // 500
-```
-
-### MockWebSocket
-
-Paired fakes for WebSocket testing:
-
-```swift
-let (client, server) = MockWebSocket.pair()
-
-// Simulate server sending a message
-try await server.send(.text("hello from server"))
-
-// Client receives it
-for await event in client.events {
-    if case .message(.text(let text)) = event {
-        #expect(text == "hello from server")
-    }
-}
-
-// Test disconnection
-client.close(code: 1000, reason: "done")
-#expect(client.state == .disconnected)
-#expect(server.state == .disconnected)
-```
-
-### Testing Interceptors
-
-```swift
-@Test func authInterceptorInjectsToken() async throws {
-    let auth = AuthInterceptor(tokenProvider: { "my-token" })
-    let mock = MockTransport()
-    mock.stubAll(.ok())
-
-    let fiber = Fiber(baseURL: url, interceptors: [auth], transport: mock)
-    _ = try await fiber.get("/secure")
-
-    let header = mock.lastRequest?.value(forHTTPHeaderField: "Authorization")
-    #expect(header == "Bearer my-token")
-}
-```
-
-### Testing Tracing
-
-```swift
-let collector = TestTraceCollector()
-let logging = LoggingInterceptor(logger: collector.logger())
-
-let fiber = Fiber(baseURL: url, interceptors: [logging], transport: mock)
-_ = try await fiber.get("/test")
-
-#expect(collector.logs.count >= 2)  // request + response logged
-```
+[Full Testing Guide →](docs/Testing.md)
 
 ---
 
-## Custom Transport
+## Comparison
 
-Swap the underlying HTTP transport for any environment:
-
-```swift
-struct MyCustomTransport: FiberTransport {
-    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        // Your custom networking implementation
-    }
-}
-
-let fiber = Fiber("https://api.example.com") {
-    $0.transport = MyCustomTransport()
-}
-```
-
----
-
-## Configuration
-
-```swift
-let fiber = Fiber("https://api.example.com") {
-    $0.interceptors = [auth, retry, logging]
-    $0.transport = URLSessionTransport(session: mySession)
-    $0.defaultHeaders = [
-        "Accept": "application/json",
-        "X-Client-Version": "1.0.0"
-    ]
-    $0.timeout = 30
-    $0.decoder = myDecoder    // custom JSONDecoder
-    $0.encoder = myEncoder    // custom JSONEncoder
-    $0.logger = OSLogFiberLogger(subsystem: "com.myapp.fiber")
-    $0.validateStatus = { (200..<400).contains($0) }  // treat 3xx as success
-}
-```
-
----
-
-## Error Handling
-
-```swift
-do {
-    let user: User = try await fiber.get("/users/1").decode()
-} catch let error as FiberError {
-    switch error {
-    case .httpError(let statusCode, let data, let response):
-        print("HTTP \(statusCode): \(String(data: data, encoding: .utf8) ?? "")")
-    case .decodingError(let underlying, let data):
-        print("Failed to decode: \(underlying)")
-        print("Raw response: \(String(data: data, encoding: .utf8) ?? "")")
-    case .networkError(let underlying):
-        print("Network failure: \(underlying.localizedDescription)")
-    case .timeout:
-        print("Request timed out")
-    case .cancelled:
-        print("Request was cancelled")
-    case .interceptor(let name, let underlying):
-        print("Interceptor '\(name)' failed: \(underlying)")
-    case .invalidURL(let string):
-        print("Bad URL: \(string)")
-    case .encodingError(let underlying):
-        print("Encoding failed: \(underlying)")
-    }
-}
-```
+| Feature | Fiber | Alamofire | Moya | URLSession |
+|---------|-------|-----------|------|------------|
+| **Paradigm** | Functional, immutable | OOP, mutable | OOP, enum-based | OOP, delegate |
+| **Request type** | Immutable struct | Mutable request | Enum target | Mutable URLRequest |
+| **Middleware** | Composable interceptors | RequestAdapter/Retrier | Plugin protocol | None |
+| **Built-in interceptors** | 7 (auth, retry, cache, log, metrics, encryption, rate limit) | 2 (retry, auth) | 0 (plugins only) | 0 |
+| **WebSocket** | Protocol + reconnection | None | None | Low-level API |
+| **Validation DSL** | Result-builder, type-safe | Parameter encoding | None | None |
+| **Distributed tracing** | TaskLocal trace IDs + spans | None | None | None |
+| **End-to-end encryption** | AES-GCM interceptor | None | None | None |
+| **Rate limiting** | Token bucket interceptor | None | None | None |
+| **Testability** | MockTransport + StubResponse | URLProtocol subclass | Stub closures | URLProtocol subclass |
+| **Caching** | TTL + SWR + ETag + disk | URLCache | URLCache | URLCache |
+| **swift-dependencies** | First-class integration | None | None | None |
+| **swift-sharing** | Declarative @SharedReader | None | None | None |
+| **Swift 6 concurrency** | Sendable throughout | Partial | Partial | Partial |
+| **Core dependencies** | 0 (Foundation only) | 0 | Alamofire | 0 |
 
 ---
 
@@ -1186,62 +454,66 @@ do {
 ```
 swift-fiber/
 ├── Sources/
-│   ├── Fiber/                          # Core HTTP client (zero dependencies)
-│   │   ├── FiberClient.swift               # Fiber class + Endpoint protocol
-│   │   ├── FiberDefaults.swift             # Injectable constants
-│   │   ├── FiberRequest.swift              # Immutable request + combinators
-│   │   ├── FiberResponse.swift             # Response + decode/validate
-│   │   ├── FiberTransport.swift            # Transport protocol + URLSession
-│   │   ├── Interceptor.swift               # Interceptor protocol + chain
-│   │   ├── FiberError.swift                # Typed errors
-│   │   ├── FiberLogger.swift               # Logger protocol + implementations
-│   │   ├── TraceContext.swift              # TaskLocal tracing + spans
-│   │   ├── Auth/Retry/Cache/Logging/Metrics/Encryption/RateLimit Interceptors
-│   ├── FiberWebSocket/                 # WebSocket support
-│   │   ├── FiberWebSocket.swift            # Protocol + events
-│   │   ├── WebSocketMessage.swift          # Typed messages
-│   │   ├── URLSessionWebSocket.swift       # URLSession transport
-│   │   └── ReconnectionStrategy.swift      # Auto-reconnect
-│   ├── FiberDependencies/              # swift-dependencies integration
-│   │   ├── FiberHTTPClient.swift           # Struct-of-closures client
-│   │   ├── FiberHTTPClient+Live.swift      # Live implementation
-│   │   ├── FiberHTTPClient+DependencyKey.swift
-│   │   ├── FiberClient+DependencyKey.swift
-│   │   └── FiberDefaults+DependencyKey.swift
-│   ├── FiberSharing/                   # swift-sharing integration + caching
-│   │   ├── FiberConfiguration.swift        # Shared config value type
-│   │   ├── FiberConfigurationKey.swift     # SharedReaderKey for config
-│   │   ├── SharedFiber.swift               # Reactive client
-│   │   ├── SharedFiber+Cache.swift         # Imperative cached fetching
-│   │   ├── CachePolicy.swift              # Configurable cache behavior
-│   │   ├── CachedResponse.swift           # Response wrapper with metadata
-│   │   ├── SharedCacheStore.swift         # Actor-based LRU cache + disk
-│   │   ├── APIResponseKey.swift           # SharedReaderKey for API data
-│   │   └── APIResponseKey+Extensions.swift # .api() / .cachedAPI() syntax
-│   ├── FiberValidation/                # Domain model validation
-│   │   ├── ValidationSeverity.swift       # .error / .warning enum
-│   │   ├── ValidationError.swift          # Rich error: path, message, code, severity
-│   │   ├── ValidationResult.swift         # Aggregated result with merging
-│   │   ├── ValidationRule.swift           # Core rule struct + 12 built-in rules
-│   │   ├── ValidatorBuilder.swift         # @ValidatorBuilder + @RuleBuilder DSL
-│   │   ├── PropertyValidator.swift        # AnyFieldValidator + Validate<Root, Value>
-│   │   ├── CollectionValidator.swift      # ValidateEach for collection elements
-│   │   ├── ConditionalValidator.swift     # ValidateIf for conditional rules
-│   │   ├── Validator.swift                # Composed Validator<T>
-│   │   └── ValidationInterceptor.swift    # Fiber interceptor integration
-│   ├── FiberDependenciesTesting/       # Test helpers
-│   │   └── FiberHTTPClient+Testing.swift
-│   └── FiberTesting/                   # Test infrastructure
-│       ├── MockTransport.swift             # Request recording + stubs
-│       ├── StubResponse.swift              # Response builders
-│       ├── MockWebSocket.swift             # Paired fakes
-│       └── TestTraceCollector.swift        # Trace assertions
-└── Tests/
-    ├── FiberTests/                     # 35 core tests
-    ├── FiberIntegrationTests/          # 57 integration tests
-    └── FiberValidationTests/           # 55 validation tests (147 total)
+│   ├── Fiber/                          Core HTTP client (zero dependencies)
+│   │   ├── FiberClient.swift               Fiber client + Endpoint protocol
+│   │   ├── FiberRequest.swift              Immutable request + combinators
+│   │   ├── FiberResponse.swift             Response + decode/validate
+│   │   ├── Interceptor.swift               Interceptor protocol + chain builder
+│   │   ├── FiberError.swift                Typed error enum
+│   │   ├── FiberTransport.swift            Transport protocol + URLSession
+│   │   ├── FiberLogger.swift               Logger protocol + Print/OSLog impls
+│   │   ├── FiberDefaults.swift             Injectable constants
+│   │   ├── TraceContext.swift              TaskLocal tracing + spans
+│   │   └── Interceptors/                   7 built-in interceptors
+│   │       ├── AuthInterceptor.swift
+│   │       ├── RetryInterceptor.swift
+│   │       ├── CacheInterceptor.swift
+│   │       ├── LoggingInterceptor.swift
+│   │       ├── MetricsInterceptor.swift
+│   │       ├── EncryptionInterceptor.swift
+│   │       └── RateLimitInterceptor.swift
+│   ├── FiberWebSocket/                 WebSocket support
+│   │   ├── FiberWebSocket.swift            Protocol + events + state
+│   │   ├── WebSocketMessage.swift          text/binary/json messages
+│   │   ├── URLSessionWebSocket.swift       URLSession transport
+│   │   └── ReconnectionStrategy.swift      Auto-reconnect strategies
+│   ├── FiberValidation/                Domain model validation
+│   │   ├── Validator.swift                 Composed Validator<T>
+│   │   ├── ValidationRule.swift            12 built-in rules
+│   │   ├── ValidatorBuilder.swift          @ValidatorBuilder + @RuleBuilder
+│   │   ├── PropertyValidator.swift         Validate<Root, Value>
+│   │   ├── CollectionValidator.swift       ValidateEach
+│   │   ├── ConditionalValidator.swift      ValidateIf
+│   │   └── ValidationInterceptor.swift     Fiber integration
+│   ├── FiberSharing/                   swift-sharing + caching
+│   │   ├── SharedFiber.swift               Reactive client
+│   │   ├── CachePolicy.swift              TTL, SWR, storage modes
+│   │   ├── CachedResponse.swift           Value + freshness metadata
+│   │   ├── SharedCacheStore.swift         Actor-based LRU + disk
+│   │   └── APIResponseKey.swift           @SharedReader integration
+│   ├── FiberDependencies/              swift-dependencies integration
+│   │   ├── FiberHTTPClient.swift           Struct-of-closures client
+│   │   └── *+DependencyKey.swift           Dependency keys
+│   ├── FiberTesting/                   Test infrastructure
+│   │   ├── MockTransport.swift             Request recording + stubs
+│   │   ├── StubResponse.swift              Chainable response builder
+│   │   ├── MockWebSocket.swift             Paired fakes
+│   │   └── TestTraceCollector.swift        Log assertions
+│   └── FiberDependenciesTesting/       Dependency test helpers
+└── Tests/                              147 tests
+    ├── FiberTests/                         35 core tests
+    ├── FiberIntegrationTests/              57 integration tests
+    └── FiberValidationTests/               55 validation tests
 ```
+
+---
 
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  <a href="docs/GettingStarted.md"><b>Get Started →</b></a>
+</p>
