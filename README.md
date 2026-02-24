@@ -244,7 +244,7 @@ Detailed guides for every feature area:
 | **[Caching](docs/Caching.md)** | Cache policies, imperative & declarative caching, SWR, ETag, invalidation |
 | **[Testing](docs/Testing.md)** | MockTransport, StubResponse, MockWebSocket, testing interceptors, dependency testing |
 | **[Advanced](docs/Advanced.md)** | Distributed tracing, encryption, custom transports, metrics, injectable defaults, integrations |
-| **[Real-World Examples](docs/Examples.md)** | E-commerce, social feed, multi-tenant SaaS, offline-first, analytics pipeline |
+| **[Real-World Examples](docs/Examples.md)** | E-commerce, social feed, multi-tenant SaaS, offline-first, analytics, FiberSharing multi-env, FiberDependencies feature module |
 
 ---
 
