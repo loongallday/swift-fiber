@@ -22,6 +22,7 @@ let users: [User] = try await fiber.get("/users", query: ["page": "1"]).decode()
 - **Injectable Defaults** -- All constants centralized in FiberDefaults
 - **swift-dependencies** -- Optional Point-Free integration (FiberDependencies)
 - **swift-sharing** -- Optional reactive config + declarative API caching (FiberSharing)
+- **Domain Validation** -- Composable result-builder DSL for model validation (FiberValidation)
 - **Zero Core Dependencies** -- Core module uses only Foundation, OSLog, and CryptoKit
 
 ## Requirements
@@ -47,6 +48,7 @@ Add the targets you need:
     "FiberWebSocket",           // WebSocket support
     "FiberDependencies",        // swift-dependencies integration (optional)
     "FiberSharing",             // swift-sharing integration (optional)
+    "FiberValidation",          // Domain model validation DSL (optional)
     "FiberTesting",             // Mock infrastructure (test target only)
     "FiberDependenciesTesting", // Test helpers for FiberDependencies (test only)
 ])
@@ -793,6 +795,205 @@ print(await store.memoryCount)
 
 ---
 
+## Domain Validation (FiberValidation)
+
+A composable, type-safe validation system for any domain model. Uses Swift result builders for a declarative DSL, supports nested objects, collections, conditional rules, async validation, and integrates with Fiber's interceptor pipeline.
+
+```swift
+import FiberValidation
+
+let userValidator = Validator<User> {
+    Validate(\.name, label: "name") {
+        ValidationRule.notEmpty(message: "Name is required")
+        ValidationRule.minLength(2)
+        ValidationRule.maxLength(100)
+    }
+    Validate(\.email, label: "email") {
+        ValidationRule.notEmpty()
+        ValidationRule.email()
+    }
+    Validate(\.age, label: "age") {
+        ValidationRule.range(18...120)
+    }
+}
+
+let result = userValidator.validate(user)
+if !result.isValid {
+    for error in result.errorItems {
+        print("\(error.path): \(error.message)")
+        // "name: Name is required"
+        // "email: Invalid email format"
+    }
+}
+```
+
+### Built-in Rules
+
+| Rule | Constraint | Description |
+|------|-----------|-------------|
+| `.notNil()` | `Optional` | Must not be nil |
+| `.notEmpty()` | `Collection` | Must not be empty |
+| `.minLength(_:)` | `Collection` | Count >= minimum |
+| `.maxLength(_:)` | `Collection` | Count <= maximum |
+| `.lengthRange(_:)` | `Collection` | Count within range |
+| `.pattern(_:)` | `String` | Matches regex pattern |
+| `.email()` | `String` | Valid email format |
+| `.url()` | `String` | Valid URL format |
+| `.range(_:)` | `Comparable` | Within closed range |
+| `.equals(_:)` | `Equatable` | Must equal expected value |
+| `.custom(_:)` | any | Custom sync predicate |
+| `.asyncCustom(_:)` | any | Custom async predicate |
+
+Every rule accepts optional `message`, `code`, and `severity` parameters:
+
+```swift
+ValidationRule.minLength(8, message: "Password too short", code: "passwordLength", severity: .error)
+```
+
+### Nested Validation
+
+Compose validators for nested objects. Paths are automatically prefixed:
+
+```swift
+let addressValidator = Validator<Address> {
+    Validate(\.street, label: "street") { ValidationRule.notEmpty() }
+    Validate(\.city, label: "city") { ValidationRule.notEmpty() }
+    Validate(\.zipCode, label: "zipCode") { ValidationRule.pattern(#"^\d{5}$"#) }
+}
+
+let userValidator = Validator<User> {
+    Validate(\.address, label: "address", validator: addressValidator)
+}
+
+// Errors have prefixed paths: "address.street", "address.zipCode"
+```
+
+### Collection Validation
+
+Validate each element with indexed error paths:
+
+```swift
+let validator = Validator<User> {
+    ValidateEach(\.tags, label: "tags") {
+        ValidationRule.notEmpty()
+        ValidationRule.maxLength(50)
+    }
+}
+
+// Errors: "tags[0]: Must not be empty", "tags[2]: ..."
+```
+
+### Conditional Validation
+
+Apply rules only when a condition is met:
+
+```swift
+let validator = Validator<User> {
+    ValidateIf({ $0.isAdmin }) {
+        Validate(\.adminCode, label: "adminCode") {
+            ValidationRule.notNil(message: "Admin code required")
+        }
+    }
+}
+```
+
+### Async Validation
+
+For rules that require network calls (e.g., uniqueness checks):
+
+```swift
+let validator = Validator<User> {
+    Validate(\.email, label: "email") {
+        ValidationRule.email()
+        ValidationRule.asyncCustom(message: "Email already taken") { email in
+            await checkEmailAvailability(email)
+        }
+    }
+}
+
+let result = await validator.validateAsync(user)
+```
+
+### Severity Levels
+
+Rules default to `.error` severity. Use `.warning` for non-blocking issues:
+
+```swift
+Validate(\.name, label: "name") {
+    ValidationRule.notEmpty()                                   // .error (default)
+    ValidationRule.minLength(10, severity: .warning)            // .warning
+}
+
+let result = validator.validate(user)
+result.isValid                    // true (no errors, just warnings)
+result.hasWarnings                // true
+result.isValid(failOnWarnings: true)  // false (treats warnings as errors)
+```
+
+### ValidationResult
+
+```swift
+let result = validator.validate(user)
+
+result.isValid            // true if no .error severity items
+result.isClean            // true if no items at all (no errors or warnings)
+result.hasWarnings        // true if any .warning severity items
+result.errorItems         // [ValidationError] with .error severity
+result.warningItems       // [ValidationError] with .warning severity
+result.errors             // all [ValidationError] regardless of severity
+
+// Merge results
+let combined = result1.merging(result2)
+```
+
+### Fiber Interceptor Integration
+
+Automatically validate request bodies before they hit the network:
+
+```swift
+import Fiber
+import FiberValidation
+
+let createUserValidator = Validator<CreateUser> {
+    Validate(\.name, label: "name") {
+        ValidationRule.notEmpty(message: "Name is required")
+        ValidationRule.minLength(2)
+    }
+    Validate(\.email, label: "email") {
+        ValidationRule.email()
+    }
+}
+
+let fiber = Fiber(baseURL: url, interceptors: [
+    ValidationInterceptor<CreateUser>(validator: createUserValidator)
+], transport: transport)
+
+// Valid body — request proceeds normally
+let response = try await fiber.post("/users", body: validUser)
+
+// Invalid body — throws FiberError.interceptor before sending
+do {
+    _ = try await fiber.post("/users", body: invalidUser)
+} catch let error as FiberError {
+    if case .interceptor(let name, let underlying) = error {
+        let failure = underlying as! ValidationFailure
+        print(failure.result.errorItems)  // [ValidationError]
+    }
+}
+```
+
+Configure which HTTP methods trigger validation and whether warnings fail:
+
+```swift
+ValidationInterceptor<CreateUser>(
+    validator: createUserValidator,
+    for: [.post, .put],       // default: [.post, .put, .patch]
+    failOnWarnings: true       // default: false
+)
+```
+
+---
+
 ## Testing
 
 Fiber ships with `FiberTesting`, a dedicated module for writing tests against your networking code without hitting real servers.
@@ -1017,6 +1218,17 @@ swift-fiber/
 │   │   ├── SharedCacheStore.swift         # Actor-based LRU cache + disk
 │   │   ├── APIResponseKey.swift           # SharedReaderKey for API data
 │   │   └── APIResponseKey+Extensions.swift # .api() / .cachedAPI() syntax
+│   ├── FiberValidation/                # Domain model validation
+│   │   ├── ValidationSeverity.swift       # .error / .warning enum
+│   │   ├── ValidationError.swift          # Rich error: path, message, code, severity
+│   │   ├── ValidationResult.swift         # Aggregated result with merging
+│   │   ├── ValidationRule.swift           # Core rule struct + 12 built-in rules
+│   │   ├── ValidatorBuilder.swift         # @ValidatorBuilder + @RuleBuilder DSL
+│   │   ├── PropertyValidator.swift        # AnyFieldValidator + Validate<Root, Value>
+│   │   ├── CollectionValidator.swift      # ValidateEach for collection elements
+│   │   ├── ConditionalValidator.swift     # ValidateIf for conditional rules
+│   │   ├── Validator.swift                # Composed Validator<T>
+│   │   └── ValidationInterceptor.swift    # Fiber interceptor integration
 │   ├── FiberDependenciesTesting/       # Test helpers
 │   │   └── FiberHTTPClient+Testing.swift
 │   └── FiberTesting/                   # Test infrastructure
@@ -1026,7 +1238,8 @@ swift-fiber/
 │       └── TestTraceCollector.swift        # Trace assertions
 └── Tests/
     ├── FiberTests/                     # 35 core tests
-    └── FiberIntegrationTests/          # 57 integration tests (92 total)
+    ├── FiberIntegrationTests/          # 57 integration tests
+    └── FiberValidationTests/           # 55 validation tests (147 total)
 ```
 
 ## License

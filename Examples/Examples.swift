@@ -4,6 +4,7 @@
 
 import Foundation
 import Fiber
+import FiberValidation
 import FiberWebSocket
 import CryptoKit
 
@@ -606,6 +607,324 @@ extension SharedFiber {
 // Usage:
 // try await fiber.postAndInvalidate("/users", body: newUser, invalidating: ["/users"])
 */
+
+// MARK: - 18. Domain Validation — Basic Usage
+
+/// Validate any model with composable rules via a declarative DSL.
+func basicValidation() {
+    // Define a validator for your model
+    let userValidator = Validator<UserForm> {
+        Validate(\.name, label: "name") {
+            ValidationRule.notEmpty(message: "Name is required")
+            ValidationRule.minLength(2)
+            ValidationRule.maxLength(100)
+        }
+        Validate(\.email, label: "email") {
+            ValidationRule.notEmpty()
+            ValidationRule.email()
+        }
+        Validate(\.age, label: "age") {
+            ValidationRule.range(18...120)
+        }
+    }
+
+    // Validate a model
+    let form = UserForm(name: "", email: "bad", age: 10)
+    let result = userValidator.validate(form)
+
+    if !result.isValid {
+        for error in result.errorItems {
+            print("\(error.path): \(error.message) [code: \(error.code)]")
+            // "name: Name is required [code: notEmpty]"
+            // "name: Must be at least 2 characters [code: minLength]"
+            // "email: Invalid email format [code: email]"
+            // "age: Must be between 18 and 120 [code: range]"
+        }
+    }
+
+    // Valid model passes cleanly
+    let validForm = UserForm(name: "Alice", email: "alice@example.com", age: 30)
+    let validResult = userValidator.validate(validForm)
+    print(validResult.isValid)  // true
+    print(validResult.isClean)  // true (no errors or warnings)
+}
+
+// MARK: - 19. Nested & Collection Validation
+
+/// Validate nested objects and collections with automatic path prefixing.
+func nestedAndCollectionValidation() {
+    // Nested validator for addresses
+    let addressValidator = Validator<AddressForm> {
+        Validate(\.street, label: "street") {
+            ValidationRule.notEmpty()
+        }
+        Validate(\.city, label: "city") {
+            ValidationRule.notEmpty()
+        }
+        Validate(\.zipCode, label: "zipCode") {
+            ValidationRule.pattern(#"^\d{5}$"#, message: "Must be a 5-digit ZIP code")
+        }
+    }
+
+    // Compose into a parent validator
+    let orderValidator = Validator<OrderForm> {
+        Validate(\.customerName, label: "customerName") {
+            ValidationRule.notEmpty()
+            ValidationRule.minLength(2)
+        }
+        // Nested: errors have paths like "shippingAddress.street"
+        Validate(\.shippingAddress, label: "shippingAddress", validator: addressValidator)
+
+        // Collection: errors have paths like "items[0]", "items[2]"
+        ValidateEach(\.items, label: "items") {
+            ValidationRule.notEmpty()
+        }
+    }
+
+    let order = OrderForm(
+        customerName: "",
+        shippingAddress: AddressForm(street: "", city: "NYC", zipCode: "abc"),
+        items: ["Widget", "", "Gadget"]
+    )
+
+    let result = orderValidator.validate(order)
+    for error in result.errorItems {
+        print("\(error.path): \(error.message)")
+        // "customerName: Must not be empty"
+        // "customerName: Must be at least 2 characters"
+        // "shippingAddress.street: Must not be empty"
+        // "shippingAddress.zipCode: Must be a 5-digit ZIP code"
+        // "items[1]: Must not be empty"
+    }
+}
+
+// MARK: - 20. Conditional & Severity Validation
+
+/// Rules that only apply when a condition is met, plus warning-level severity.
+func conditionalAndSeverityValidation() {
+    let registrationValidator = Validator<RegistrationForm> {
+        Validate(\.username, label: "username") {
+            ValidationRule.notEmpty()
+            ValidationRule.minLength(3)
+        }
+        Validate(\.password, label: "password") {
+            ValidationRule.notEmpty()
+            ValidationRule.minLength(8, message: "Password must be at least 8 characters")
+        }
+        // Warning: a suggestion, not a hard requirement
+        Validate(\.password, label: "password") {
+            ValidationRule.minLength(12, severity: .warning, message: "Consider using a longer password")
+        }
+
+        // Only validate company fields when registering as a business
+        ValidateIf({ $0.isBusiness }) {
+            Validate(\.companyName, label: "companyName") {
+                ValidationRule.notNil(message: "Company name required for business accounts")
+            }
+            Validate(\.taxId, label: "taxId") {
+                ValidationRule.notNil(message: "Tax ID required for business accounts")
+            }
+        }
+    }
+
+    // Personal registration — company fields are skipped
+    let personal = RegistrationForm(
+        username: "alice", password: "secret12",
+        isBusiness: false, companyName: nil, taxId: nil
+    )
+    let personalResult = registrationValidator.validate(personal)
+    print(personalResult.isValid)        // true — no errors
+    print(personalResult.hasWarnings)    // true — password is < 12 chars
+    print(personalResult.isValid(failOnWarnings: true))  // false
+
+    // Business registration — company fields are required
+    let business = RegistrationForm(
+        username: "bob", password: "corporate-pass",
+        isBusiness: true, companyName: nil, taxId: nil
+    )
+    let bizResult = registrationValidator.validate(business)
+    print(bizResult.isValid)  // false — missing companyName and taxId
+}
+
+// MARK: - 21. Async Validation
+
+/// Rules that require async operations like API calls.
+func asyncValidation() async {
+    let signupValidator = Validator<SignupForm> {
+        Validate(\.email, label: "email") {
+            ValidationRule.email()
+            // Check uniqueness against a remote API
+            ValidationRule.asyncCustom(message: "Email already registered") { email in
+                // Simulate API call
+                try? await Task.sleep(for: .milliseconds(100))
+                return email != "taken@example.com"
+            }
+        }
+        Validate(\.username, label: "username") {
+            ValidationRule.notEmpty()
+            ValidationRule.asyncCustom(message: "Username is taken") { username in
+                try? await Task.sleep(for: .milliseconds(100))
+                return !["admin", "root", "system"].contains(username)
+            }
+        }
+    }
+
+    // Must use validateAsync for validators with async rules
+    let form = SignupForm(email: "taken@example.com", username: "admin")
+    let result = await signupValidator.validateAsync(form)
+    print(result.isValid)  // false
+    for error in result.errorItems {
+        print("\(error.path): \(error.message)")
+        // "email: Email already registered"
+        // "username: Username is taken"
+    }
+}
+
+// MARK: - 22. Validation Interceptor — Fiber Integration
+
+/// Validate request bodies automatically before they reach the network.
+func validationInterceptor() async throws {
+    // Define a validator for the request body type
+    let createUserValidator = Validator<CreateUserRequest> {
+        Validate(\.name, label: "name") {
+            ValidationRule.notEmpty(message: "Name is required")
+            ValidationRule.minLength(2)
+        }
+        Validate(\.email, label: "email") {
+            ValidationRule.notEmpty()
+            ValidationRule.email()
+        }
+    }
+
+    let api = Fiber("https://api.example.com") {
+        $0.interceptors = [
+            // Validates POST/PUT/PATCH bodies as CreateUserRequest
+            ValidationInterceptor<CreateUserRequest>(
+                validator: createUserValidator
+            ),
+        ]
+    }
+
+    // Valid body — proceeds to network
+    let validUser = CreateUserRequest(name: "Alice", email: "alice@example.com")
+    let response = try await api.post("/users", body: validUser)
+    print(response.statusCode)  // 200
+
+    // Invalid body — throws before hitting the network
+    let invalidUser = CreateUserRequest(name: "", email: "bad")
+    do {
+        _ = try await api.post("/users", body: invalidUser)
+    } catch let error as FiberError {
+        if case .interceptor(let name, let underlying) = error {
+            print(name)  // "validation"
+            let failure = underlying as! ValidationFailure
+            for error in failure.result.errorItems {
+                print("\(error.path): \(error.message)")
+            }
+        }
+    }
+}
+
+// MARK: - 23. Full Validation Stack
+
+/// Production-ready example combining validation with auth, retry, and logging.
+func fullValidationStack() async throws {
+    let addressValidator = Validator<AddressForm> {
+        Validate(\.street, label: "street") { ValidationRule.notEmpty() }
+        Validate(\.city, label: "city") { ValidationRule.notEmpty() }
+        Validate(\.zipCode, label: "zipCode") { ValidationRule.pattern(#"^\d{5}$"#) }
+    }
+
+    let createOrderValidator = Validator<CreateOrderRequest> {
+        Validate(\.customerName, label: "customerName") {
+            ValidationRule.notEmpty(message: "Customer name is required")
+            ValidationRule.minLength(2)
+            ValidationRule.maxLength(200)
+        }
+        Validate(\.customerEmail, label: "customerEmail") {
+            ValidationRule.email()
+        }
+        Validate(\.shippingAddress, label: "shippingAddress", validator: addressValidator)
+        ValidateEach(\.lineItems, label: "lineItems") {
+            ValidationRule.notEmpty()
+        }
+        Validate(\.lineItems, label: "lineItems") {
+            ValidationRule.notEmpty(message: "At least one item required")
+        }
+    }
+
+    let api = Fiber("https://api.myshop.com") {
+        $0.interceptors = [
+            AuthInterceptor(tokenProvider: { "my-token" }),
+            ValidationInterceptor<CreateOrderRequest>(
+                validator: createOrderValidator,
+                for: [.post]
+            ),
+            RetryInterceptor(maxRetries: 2),
+            LoggingInterceptor(logger: PrintFiberLogger()),
+        ]
+    }
+
+    let order = CreateOrderRequest(
+        customerName: "Alice Johnson",
+        customerEmail: "alice@example.com",
+        shippingAddress: AddressForm(street: "123 Main St", city: "NYC", zipCode: "10001"),
+        lineItems: ["Widget Pro", "Gadget Deluxe"]
+    )
+
+    // Auth injects token → Validation passes → Retry wraps → Logger logs
+    let response = try await api.post("/orders", body: order)
+    print(response.statusCode)  // 201
+
+    _ = response // silence unused warnings
+}
+
+// MARK: - Validation Example Models
+
+private struct UserForm: Sendable {
+    let name: String
+    let email: String
+    let age: Int
+}
+
+private struct AddressForm: Sendable {
+    let street: String
+    let city: String
+    let zipCode: String
+}
+
+private struct OrderForm: Sendable {
+    let customerName: String
+    let shippingAddress: AddressForm
+    let items: [String]
+}
+
+private struct RegistrationForm: Sendable {
+    let username: String
+    let password: String
+    let isBusiness: Bool
+    let companyName: String?
+    let taxId: String?
+}
+
+private struct SignupForm: Sendable {
+    let email: String
+    let username: String
+}
+
+private struct CreateUserRequest: Codable, Sendable {
+    let name: String
+    let email: String
+}
+
+private struct CreateOrderRequest: Codable, Sendable {
+    let customerName: String
+    let customerEmail: String
+    let shippingAddress: AddressForm
+    let lineItems: [String]
+}
+
+extension AddressForm: Codable {}
 
 // MARK: - Supporting Types
 

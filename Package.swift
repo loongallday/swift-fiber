@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "FiberDependencies", targets: ["FiberDependencies"]),
         .library(name: "FiberSharing", targets: ["FiberSharing"]),
         .library(name: "FiberDependenciesTesting", targets: ["FiberDependenciesTesting"]),
+        .library(name: "FiberValidation", targets: ["FiberValidation"]),
     ],
     dependencies: [
         .package(url: "https://github.com/pointfreeco/swift-dependencies", from: "1.0.0"),
@@ -66,6 +67,12 @@ let package = Package(
             dependencies: ["Fiber", "FiberDependencies", "FiberTesting"],
             path: "Sources/FiberDependenciesTesting"
         ),
+        // Validation module
+        .target(
+            name: "FiberValidation",
+            dependencies: ["Fiber"],
+            path: "Sources/FiberValidation"
+        ),
         // Tests
         .testTarget(
             name: "FiberTests",
@@ -82,6 +89,11 @@ let package = Package(
                 .product(name: "Sharing", package: "swift-sharing"),
             ],
             path: "Tests/FiberIntegrationTests"
+        ),
+        .testTarget(
+            name: "FiberValidationTests",
+            dependencies: ["FiberValidation", "Fiber", "FiberTesting"],
+            path: "Tests/FiberValidationTests"
         ),
     ]
 )
